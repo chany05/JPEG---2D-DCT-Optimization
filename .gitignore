@@ -24,3 +24,6 @@ __pycache__/
 
 # Local tool settings
 .claude/
+
+# Original PNGs (embedded in docs/fig*.svg)
+docs/*.png
