@@ -1,0 +1,26 @@
+# ModelSim / Questa
+work/
+transcript
+*.wlf
+*.cr.mti
+tcl_stacktrace.txt
+*.bak
+
+*.mpf
+
+# Provided memory models (not redistributable)
+code/rflp*.v
+
+# Test images and image-derived data
+*.tif
+image_in_*.txt
+DCT_image_*.txt
+
+# MATLAB
+*.asv
+
+# Python
+__pycache__/
+
+# Local tool settings
+.claude/

@@ -1,0 +1,524 @@
+// =====================================================================
+//  top_DCT_synth_v9  -  SYNTHESIS (parameters removed, literals)
+//  coefficient 6bit Q1.5, 1D result 9bit(lane 0~8), output 12bit
+//  generated from top_2D_DCT_v8 ; requires TPMEM_16x16.v (2nd only)
+// =====================================================================
+
+module top_2D_DCT_v9 (
+    input clk, rstn
+);
+
+    wire [16*8-1:0] x_in;
+    wire [16*12-1:0] x_out;
+
+    reg [14-1:0] counter;
+
+    always @(posedge clk or negedge rstn) begin
+        if(!rstn) begin counter <= 14'd0; end
+        else counter <= counter + 14'd1;
+    end
+
+    wire [14-1:0] counter_in, counter_out;
+    assign counter_in = counter;
+    assign counter_out = counter - 14'd35;
+
+    wire [16*8-1:0] DIN;
+    wire [16*12-1:0] DO;
+    reg running;
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn)
+            running <= 1'b0;
+        else if (counter == 5'd0)   // 언더플로우 안 거치고 정상 0 도달
+            running <= 1'b1;
+    end
+
+    rflp16384x128mx16 MEM_IN(.DO(x_in),.DIN(DIN),.CLK(clk),.RA(counter_in[13:4]),.CA(counter_in[3:0]),.NWRT(1'b1),.NCE(1'b0));
+
+    DCT_2D_v9 DCT(clk, rstn, x_in, x_out, counter[4:0], running);
+
+    rflp16384x192mx16 MEM_OUT(.DO(DO),.DIN(x_out),.CLK(clk),.RA(counter_out[13:4]),.CA(counter_out[3:0]),.NWRT(1'b0),.NCE(1'b0));
+
+endmodule
+
+module top_2D_DCT_synth_v9 (
+    input clk, rstn
+);
+
+    wire [16*8-1:0] x_in;
+    wire [16*12-1:0] x_out;
+
+    reg [14-1:0] counter;
+
+    always @(posedge clk or negedge rstn) begin
+        if(!rstn) begin counter <= 14'd0; end
+        else counter <= counter + 14'd1;
+    end
+
+    reg running;
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn)
+            running <= 1'b0;
+        else if (counter == 5'd0)
+            running <= 1'b1;
+    end
+
+    D_FF128_v9 D_IN(.q(x_in),.d(128'b0),.clk(clk), .rstn(rstn));
+
+    DCT_2D_v9 DCT(clk, rstn, x_in, x_out, counter[4:0], running);
+
+    D_FF192_v9 D_OUT(.q(),.d(x_out),.clk(clk), .rstn(rstn));
+
+endmodule
+
+
+module DCT_2D_v9 (
+    input clk, rstn,
+    input [16*8-1:0] x_in,
+    output [16*12-1:0] x_out,
+    input [5-1:0] counter,
+    input running
+);
+
+    ///////////////////////////////////////////////////////////////////
+    ///////////////////////     coefficient     ///////////////////////
+    ///////////////////////////////////////////////////////////////////
+    wire signed [6-1:0] c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15;
+
+    // 16-point DCT-II unique coefficients, Q1.7 signed (sign + 7 frac bits)
+    assign c1  = 6'h0B;
+    assign c2  = 6'h0B;
+    assign c3  = 6'h0B;
+    assign c4  = 6'h0A;
+    assign c5  = 6'h0A;
+    assign c6  = 6'h09;
+    assign c7  = 6'h09;
+    assign c8  = 6'h08;
+    assign c9  = 6'h07;
+    assign c10 = 6'h06;
+    assign c11 = 6'h05;
+    assign c12 = 6'h04;
+    assign c13 = 6'h03;
+    assign c14 = 6'h02;
+    assign c15 = 6'h01;
+
+    ///////////////////////////////////////////////////////////////////
+    ///////////////////////////     DCT     ///////////////////////////
+    ///////////////////////////////////////////////////////////////////
+
+    // 1st DCT : input 8bit -> output 9bit (12 lanes, 108bit)
+
+    wire [12*9-1:0] DCT_1st_out;
+    DCT_1D_1st_v9 DCT_1st(x_in, DCT_1st_out, c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15);
+
+    wire o_en1, o_en2;
+    wire [16*9-1:0] TPmem_out1;
+
+    wire [5-1:0] counter_TP12 = counter - 5'd1;
+
+    // 12레인 + 하위 4레인 0패딩 → 16레인으로 TPMEM 입력, 전치 후 16레인 출력
+    TPmem_16x16_single_1st #(.BW(9)) TP_MEM_1(.i_data({DCT_1st_out, 36'h0}),
+                        .i_clk(clk), .i_Reset(rstn), .o_data(TPmem_out1), .o_en(o_en1));
+
+    wire [16*9-1:0] x_in2 = TPmem_out1;
+    wire [12*12-1:0] x_out2;
+    wire is_dc  = (counter_TP12[3:0] == 1);
+    wire is_dc2 = (counter_TP12[3:0] == 2);
+
+    //DCT_2nd_in : 16x9bit (x12~x15=0 from TPMEM padding), out: 12x12bit
+    DCT_1D_2nd_v9 DCT_2nd(x_in2, x_out2, c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15, is_dc, is_dc2);
+
+    // TPMEM_2: 12행×12bit, 출력은 16×12bit (상위 4행 0 패딩)
+    wire [12*12-1:0] tpmem2_out;
+    TPmem_12x12_single_2nd #(.BW(12)) TP_MEM_2(.i_data(x_out2),
+                        .i_clk(clk), .i_Reset(rstn), .o_data(tpmem2_out), .o_en(o_en2));
+    wire x_out_valid = ((counter_TP12 >= 5'd2)  && (counter_TP12 <= 5'd13)) ||
+                       ((counter_TP12 >= 5'd18) && (counter_TP12 <= 5'd29));
+    assign x_out = x_out_valid ? {tpmem2_out, 48'h0} : {16*12{1'b0}};
+
+    // ===== debug: per-lane signed split (ModelSim 파형용) =====
+    // 1st out: 12x9bit = 108bit
+    wire signed [8:0] s1_y0  = DCT_1st_out[108-1  -: 9];
+    wire signed [8:0] s1_y1  = DCT_1st_out[ 99-1  -: 9];
+    wire signed [8:0] s1_y2  = DCT_1st_out[ 90-1  -: 9];
+    wire signed [8:0] s1_y3  = DCT_1st_out[ 81-1  -: 9];
+    wire signed [8:0] s1_y4  = DCT_1st_out[ 72-1  -: 9];
+    wire signed [8:0] s1_y5  = DCT_1st_out[ 63-1  -: 9];
+    wire signed [8:0] s1_y6  = DCT_1st_out[ 54-1  -: 9];
+    wire signed [8:0] s1_y7  = DCT_1st_out[ 45-1  -: 9];
+    wire signed [8:0] s1_y8  = DCT_1st_out[ 36-1  -: 9];
+    wire signed [8:0] s1_y9  = DCT_1st_out[ 27-1  -: 9];
+    wire signed [8:0] s1_y10 = DCT_1st_out[ 18-1  -: 9];
+    wire signed [8:0] s1_y11 = DCT_1st_out[  9-1  -: 9];
+    // 2nd out: 12x12bit = 144bit
+    wire signed [11:0] s2_y0  = x_out2[144-1  -: 12];
+    wire signed [11:0] s2_y1  = x_out2[132-1  -: 12];
+    wire signed [11:0] s2_y2  = x_out2[120-1  -: 12];
+    wire signed [11:0] s2_y3  = x_out2[108-1  -: 12];
+    wire signed [11:0] s2_y4  = x_out2[ 96-1  -: 12];
+    wire signed [11:0] s2_y5  = x_out2[ 84-1  -: 12];
+    wire signed [11:0] s2_y6  = x_out2[ 72-1  -: 12];
+    wire signed [11:0] s2_y7  = x_out2[ 60-1  -: 12];
+    wire signed [11:0] s2_y8  = x_out2[ 48-1  -: 12];
+    wire signed [11:0] s2_y9  = x_out2[ 36-1  -: 12];
+    wire signed [11:0] s2_y10 = x_out2[ 24-1  -: 12];
+    wire signed [11:0] s2_y11 = x_out2[ 12-1  -: 12];
+
+endmodule
+
+
+//===========================================================================
+//  DCT_1D_1st : input 8bit (unsigned, zero-extend), output 9bit (9 lanes)
+//    W = 8+6+2 = 16, coefficient Q1.5 (x32), truncation [15:7]
+//    y0~y8 only; y9~y15 are zero and omitted
+//===========================================================================
+module DCT_1D_1st_v9
+(   input  [16*8-1:0]  x_in,
+    output [12*9-1:0] x_out,
+    input  signed [5:0] c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15  // unused (interface compat)
+);
+
+    //x_in할당 부분
+    wire signed [8:0] x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12,x13,x14,x15;
+
+    assign x15 = {1'b0, x_in[7:0]};
+    assign x0 = {1'b0, x_in[127:120]};
+
+    assign x14 = {1'b0, x_in[15:8]};
+    assign x1 = {1'b0, x_in[119:112]};
+
+    assign x13 = {1'b0, x_in[23:16]};
+    assign x2 = {1'b0, x_in[111:104]};
+
+    assign x12 = {1'b0, x_in[31:24]};
+    assign x3 = {1'b0, x_in[103:96]};
+
+    assign x11 = {1'b0, x_in[39:32]};
+    assign x4 = {1'b0, x_in[95:88]};
+
+    assign x10 = {1'b0, x_in[47:40]};
+    assign x5 = {1'b0, x_in[87:80]};
+
+    assign x9 = {1'b0, x_in[55:48]};
+    assign x6 = {1'b0, x_in[79:72]};
+
+    assign x8 = {1'b0, x_in[63:56]};
+    assign x7 = {1'b0, x_in[71:64]};
+
+
+    //s, d 할당 부분
+    wire signed [9:0] s0,s1,s2,s3,s4,s5,s6,s7;
+    wire signed [8:0] d0,d1,d2,d3,d4,d5,d6,d7;
+
+    assign s0=x0+x15; assign d0=x0-x15;
+    assign s1=x1+x14; assign d1=x1-x14;
+    assign s2=x2+x13; assign d2=x2-x13;
+    assign s3=x3+x12; assign d3=x3-x12;
+    assign s4=x4+x11; assign d4=x4-x11;
+    assign s5=x5+x10; assign d5=x5-x10;
+    assign s6=x6+x9; assign d6=x6-x9;
+    assign s7=x7+x8; assign d7=x7-x8;
+
+    //odd 8 dct에서의 3mult의 t를 정의, 곱셈은 상수값으로 미리 계산해서함
+    wire signed [9:0] o8_sum0=d0+d7;
+    wire signed [9:0] o8_sum1=d1+d6;
+    wire signed [9:0] o8_sum2=d2+d5;
+    wire signed [9:0] o8_sum3=d3+d4;
+
+    wire signed [17:0] t_o8_y10=1*o8_sum0;
+    wire signed [17:0] A_o8_y10=10*d0+t_o8_y10;
+
+    wire signed [17:0] t_o8_y11=3*o8_sum1;
+    wire signed [17:0] A_o8_y11=8*d1+t_o8_y11;
+
+    wire signed [17:0] t_o8_y12=5*o8_sum2;
+    wire signed [17:0] A_o8_y12=5*d2+t_o8_y12;
+
+    wire signed [17:0] t_o8_y13=7*o8_sum3;
+    wire signed [17:0] A_o8_y13=2*d3+t_o8_y13;
+
+    wire signed [17:0] t_o8_y30=-3*o8_sum0;
+    wire signed [17:0] A_o8_y30=14*d0+t_o8_y30;
+
+    wire signed [17:0] t_o8_y31=-9*o8_sum1;
+    wire signed [17:0] A_o8_y31=16*d1+t_o8_y31;
+
+    wire signed [17:0] t_o8_y32=-11*o8_sum2;
+    wire signed [17:0] A_o8_y32=12*d2+t_o8_y32;
+
+    wire signed [17:0] t_o8_y33=-10*o8_sum3;
+    wire signed [17:0] A_o8_y33=5*d3+t_o8_y33;
+
+    wire signed [17:0] t_o8_y50=5*o8_sum0;
+    wire signed [17:0] A_o8_y50=5*d0+t_o8_y50;
+
+    wire signed [17:0] t_o8_y51=11*o8_sum1;
+    wire signed [17:0] A_o8_y51=-10*d1+t_o8_y51;
+
+    wire signed [17:0] t_o8_y52=7*o8_sum2;
+    wire signed [17:0] A_o8_y52=-16*d2+t_o8_y52;
+
+    wire signed [17:0] t_o8_y53=-3*o8_sum3;
+    wire signed [17:0] A_o8_y53=-8*d3+t_o8_y53;
+
+    wire signed [17:0] B_o8_y50=t_o8_y50-(15)*d7;
+    wire signed [17:0] B_o8_y51=(12)*d6-t_o8_y51;
+    wire signed [17:0] B_o8_y52=t_o8_y52-(-2)*d5;
+    wire signed [17:0] B_o8_y53=(-14)*d4-t_o8_y53;
+
+    //8point dct부분
+    wire signed [10:0] ss0,ss1,ss2,ss3;
+    wire signed [9:0] sd0,sd1,sd2,sd3;
+
+    assign ss0=s0+s7; assign sd0=s0-s7;
+    assign ss1=s1+s6; assign sd1=s1-s6;
+    assign ss2=s2+s5; assign sd2=s2-s5;
+    assign ss3=s3+s4; assign sd3=s3-s4;
+
+    //4point odd dct, 여기도 위랑 동일
+    wire signed [10:0] o4_sum0=sd0+sd3;
+    wire signed [10:0] o4_sum1=sd1+sd2;
+
+    wire signed [17:0] t_o4_y20=2*o4_sum0;
+    wire signed [17:0] A_o4_y20=9*sd0+t_o4_y20;
+    wire signed [17:0] t_o4_y21=6*o4_sum1;
+    wire signed [17:0] A_o4_y21=3*sd1+t_o4_y21;
+    wire signed [17:0] t_o4_y60=-6*o4_sum0;
+    wire signed [17:0] A_o4_y60=15*sd0+t_o4_y60;
+    wire signed [17:0] B_o4_y60=(3)*sd3-t_o4_y60;
+    wire signed [17:0] t_o4_y61=-11*o4_sum1;
+    wire signed [17:0] A_o4_y61=9*sd1+t_o4_y61;
+    wire signed [17:0] B_o4_y61=t_o4_y61-(-13)*sd2;
+
+    //4point dct
+    wire signed [11:0] sss0,sss1;
+    wire signed [10:0] ssd0,ssd1;
+
+    //2point odd dct, 위랑 동일
+    assign sss0=ss0+ss3; assign ssd0=ss0-ss3;
+    assign sss1=ss1+ss2; assign ssd1=ss1-ss2;
+
+    wire signed [11:0] o2_sum0=ssd0+ssd1;
+    wire signed [17:0] t_o2_y40=4*o2_sum0;
+    wire signed [17:0] A_o2_y40=6*ssd0+t_o2_y40;
+    wire signed [17:0] B_o2_y40=t_o2_y40-(14)*ssd1;
+
+    // y70~73 t/A/B wire
+    wire signed [17:0] t_o8_y70=-7*o8_sum0;
+    wire signed [17:0] A_o8_y70=16*d0+t_o8_y70;
+    wire signed [17:0] B_o8_y70=(2)*d7-t_o8_y70;
+    wire signed [17:0] t_o8_y71=-10*o8_sum1;
+    wire signed [17:0] A_o8_y71=5*d1+t_o8_y71;
+    wire signed [17:0] B_o8_y71=t_o8_y71-(-15)*d6;
+    wire signed [17:0] t_o8_y72=3*o8_sum2;
+    wire signed [17:0] A_o8_y72=-14*d2+t_o8_y72;
+    wire signed [17:0] B_o8_y72=(-8)*d5-t_o8_y72;
+    wire signed [17:0] t_o8_y73=11*o8_sum3;
+    wire signed [17:0] A_o8_y73=-10*d3+t_o8_y73;
+    wire signed [17:0] B_o8_y73=t_o8_y73-(12)*d4;
+
+    wire signed [15:0] y0,y1,y2,y3,y4,y5,y6,y7,y8,y9,y10,y11;
+
+    assign y0  = 8*(sss0+sss1);
+    assign y8  = 8*(sss0-sss1);
+    assign y1  = A_o8_y10+A_o8_y11+A_o8_y12+A_o8_y13;
+    assign y2  = A_o4_y20+A_o4_y21;
+    assign y3  = A_o8_y30+A_o8_y31+A_o8_y32+A_o8_y33;
+    assign y4  = A_o2_y40;
+    assign y5  = A_o8_y50+A_o8_y51+A_o8_y52+A_o8_y53;
+    assign y6  = A_o4_y60+A_o4_y61;
+    assign y7  = A_o8_y70+A_o8_y71+A_o8_y72+A_o8_y73;
+    assign y9  = B_o8_y70+B_o8_y71+B_o8_y72+B_o8_y73;
+    assign y10 = B_o4_y60+B_o4_y61;
+    assign y11 = B_o8_y50+B_o8_y51+B_o8_y52+B_o8_y53;
+
+    assign x_out = {y0[15:7],y1[15:7],y2[15:7],y3[15:7],y4[15:7],y5[15:7],y6[15:7],
+                y7[15:7],y8[15:7],y9[15:7],y10[15:7],y11[15:7]};
+endmodule
+
+//===========================================================================
+//  DCT_1D_2nd : input 9bit (signed, sign-extend) x 9 lanes, output 12bit
+//    W = 9+6+2 = 17, y=DCT_2d*4.  DC->y[15:4] ; AC->y[13:2]
+//    x9~x15 = 0 (omitted from input, zero-extended)
+//===========================================================================
+module DCT_1D_2nd_v9
+(   input  [16*9-1:0] x_in,
+    output [12*12-1:0] x_out,
+    input  signed [5:0] c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,  // unused
+    input is_dc, is_dc2
+);
+
+    //x_in할당 부분 (9bit sign-extend → 10bit), x12~x15은 TPMEM 패딩(0)
+    wire signed [9:0] x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12,x13,x14,x15;
+
+    assign x0  = {x_in[9*16-1], x_in[9*16-1:9*15]};
+    assign x1  = {x_in[9*15-1], x_in[9*15-1:9*14]};
+    assign x2  = {x_in[9*14-1], x_in[9*14-1:9*13]};
+    assign x3  = {x_in[9*13-1], x_in[9*13-1:9*12]};
+    assign x4  = {x_in[9*12-1], x_in[9*12-1:9*11]};
+    assign x5  = {x_in[9*11-1], x_in[9*11-1:9*10]};
+    assign x6  = {x_in[9*10-1], x_in[9*10-1:9*9]};
+    assign x7  = {x_in[9*9-1],  x_in[9*9-1:9*8]};
+    assign x8  = {x_in[9*8-1],  x_in[9*8-1:9*7]};
+    assign x9  = {x_in[9*7-1],  x_in[9*7-1:9*6]};
+    assign x10 = {x_in[9*6-1],  x_in[9*6-1:9*5]};
+    assign x11 = {x_in[9*5-1],  x_in[9*5-1:9*4]};
+    assign x12 = {x_in[9*4-1],  x_in[9*4-1:9*3]};
+    assign x13 = {x_in[9*3-1],  x_in[9*3-1:9*2]};
+    assign x14 = {x_in[9*2-1],  x_in[9*2-1:9*1]};
+    assign x15 = {x_in[9*1-1],  x_in[9*1-1:9*0]};
+
+    //s, d 할당 부분
+    wire signed [10:0] s0,s1,s2,s3,s4,s5,s6,s7;
+    wire signed [9:0]  d0,d1,d2,d3,d4,d5,d6,d7;
+
+    assign s0=x0+x15; assign d0=x0-x15;
+    assign s1=x1+x14; assign d1=x1-x14;
+    assign s2=x2+x13; assign d2=x2-x13;
+    assign s3=x3+x12; assign d3=x3-x12;
+    assign s4=x4+x11; assign d4=x4-x11;
+    assign s5=x5+x10; assign d5=x5-x10;
+    assign s6=x6+x9; assign d6=x6-x9;
+    assign s7=x7+x8; assign d7=x7-x8;
+
+    //odd 8 dct에서의 3mult의 t를 정의 (W=17, rotation wire [18:0])
+    wire signed [10:0] o8_sum0=d0+d7;
+    wire signed [10:0] o8_sum1=d1+d6;
+    wire signed [10:0] o8_sum2=d2+d5;
+    wire signed [10:0] o8_sum3=d3+d4;
+
+    wire signed [18:0] t_o8_y10=1*o8_sum0;
+    wire signed [18:0] A_o8_y10=10*d0+t_o8_y10;
+    wire signed [18:0] B_o8_y10=t_o8_y10-(12)*d7;
+    wire signed [18:0] t_o8_y11=3*o8_sum1;
+    wire signed [18:0] A_o8_y11=8*d1+t_o8_y11;
+    wire signed [18:0] B_o8_y11=(14)*d6-t_o8_y11;
+    wire signed [18:0] t_o8_y12=5*o8_sum2;
+    wire signed [18:0] A_o8_y12=5*d2+t_o8_y12;
+    wire signed [18:0] B_o8_y12=t_o8_y12-(15)*d5;
+    wire signed [18:0] t_o8_y13=7*o8_sum3;
+    wire signed [18:0] A_o8_y13=2*d3+t_o8_y13;
+    wire signed [18:0] B_o8_y13=(16)*d4-t_o8_y13;
+    wire signed [18:0] t_o8_y30=-3*o8_sum0;
+    wire signed [18:0] A_o8_y30=14*d0+t_o8_y30;
+    wire signed [18:0] B_o8_y30=(8)*d7-t_o8_y30;
+    wire signed [18:0] t_o8_y31=-9*o8_sum1;
+    wire signed [18:0] A_o8_y31=16*d1+t_o8_y31;
+    wire signed [18:0] B_o8_y31=t_o8_y31-(-2)*d6;
+    wire signed [18:0] t_o8_y32=-11*o8_sum2;
+    wire signed [18:0] A_o8_y32=12*d2+t_o8_y32;
+    wire signed [18:0] B_o8_y32=(-10)*d5-t_o8_y32;
+    wire signed [18:0] t_o8_y33=-10*o8_sum3;
+    wire signed [18:0] A_o8_y33=5*d3+t_o8_y33;
+    wire signed [18:0] B_o8_y33=t_o8_y33-(-15)*d4;
+    wire signed [18:0] t_o8_y50=5*o8_sum0;
+    wire signed [18:0] A_o8_y50=5*d0+t_o8_y50;
+    wire signed [18:0] B_o8_y50=t_o8_y50-(15)*d7;
+    wire signed [18:0] t_o8_y51=11*o8_sum1;
+    wire signed [18:0] A_o8_y51=-10*d1+t_o8_y51;
+    wire signed [18:0] B_o8_y51=(12)*d6-t_o8_y51;
+    wire signed [18:0] t_o8_y52=7*o8_sum2;
+    wire signed [18:0] A_o8_y52=-16*d2+t_o8_y52;
+    wire signed [18:0] B_o8_y52=t_o8_y52-(-2)*d5;
+    wire signed [18:0] t_o8_y53=-3*o8_sum3;
+    wire signed [18:0] A_o8_y53=-8*d3+t_o8_y53;
+    wire signed [18:0] B_o8_y53=(-14)*d4-t_o8_y53;
+    wire signed [18:0] t_o8_y70=-7*o8_sum0;
+    wire signed [18:0] A_o8_y70=16*d0+t_o8_y70;
+    wire signed [18:0] B_o8_y70=(2)*d7-t_o8_y70;
+    wire signed [18:0] t_o8_y71=-10*o8_sum1;
+    wire signed [18:0] A_o8_y71=5*d1+t_o8_y71;
+    wire signed [18:0] B_o8_y71=t_o8_y71-(-15)*d6;
+    wire signed [18:0] t_o8_y72=3*o8_sum2;
+    wire signed [18:0] A_o8_y72=-14*d2+t_o8_y72;
+    wire signed [18:0] B_o8_y72=(-8)*d5-t_o8_y72;
+    wire signed [18:0] t_o8_y73=11*o8_sum3;
+    wire signed [18:0] A_o8_y73=-10*d3+t_o8_y73;
+    wire signed [18:0] B_o8_y73=t_o8_y73-(12)*d4;
+
+    //8point dct부분
+    wire signed [11:0] ss0,ss1,ss2,ss3;
+    wire signed [10:0] sd0,sd1,sd2,sd3;
+
+    assign ss0=s0+s7; assign sd0=s0-s7;
+    assign ss1=s1+s6; assign sd1=s1-s6;
+    assign ss2=s2+s5; assign sd2=s2-s5;
+    assign ss3=s3+s4; assign sd3=s3-s4;
+
+    //4point odd dct
+    wire signed [11:0] o4_sum0=sd0+sd3;
+    wire signed [11:0] o4_sum1=sd1+sd2;
+
+    wire signed [18:0] t_o4_y20=2*o4_sum0;
+    wire signed [18:0] A_o4_y20=9*sd0+t_o4_y20;
+    wire signed [18:0] B_o4_y20=t_o4_y20-(13)*sd3;
+    wire signed [18:0] t_o4_y21=6*o4_sum1;
+    wire signed [18:0] A_o4_y21=3*sd1+t_o4_y21;
+    wire signed [18:0] B_o4_y21=(15)*sd2-t_o4_y21;
+    wire signed [18:0] t_o4_y60=-6*o4_sum0;
+    wire signed [18:0] A_o4_y60=15*sd0+t_o4_y60;
+    wire signed [18:0] B_o4_y60=(3)*sd3-t_o4_y60;
+    wire signed [18:0] t_o4_y61=-11*o4_sum1;
+    wire signed [18:0] A_o4_y61=9*sd1+t_o4_y61;
+    wire signed [18:0] B_o4_y61=t_o4_y61-(-13)*sd2;
+
+    //4point dct
+    wire signed [12:0] sss0,sss1;
+    wire signed [11:0] ssd0,ssd1;
+
+    assign sss0=ss0+ss3; assign ssd0=ss0-ss3;
+    assign sss1=ss1+ss2; assign ssd1=ss1-ss2;
+
+    wire signed [12:0] o2_sum0=ssd0+ssd1;
+    wire signed [18:0] t_o2_y40=4*o2_sum0;
+    wire signed [18:0] A_o2_y40=6*ssd0+t_o2_y40;
+    wire signed [18:0] B_o2_y40=t_o2_y40-(14)*ssd1;
+
+    wire signed [16:0] y0,y1,y2,y3,y4,y5,y6,y7,y8,y9,y10,y11;
+
+    assign y0 = 8*(sss0+sss1);
+    assign y8 = 8*(sss0-sss1);
+    assign y1 = A_o8_y10+A_o8_y11+A_o8_y12+A_o8_y13;
+    assign y2 = A_o4_y20+A_o4_y21;
+    assign y3 = A_o8_y30+A_o8_y31+A_o8_y32+A_o8_y33;
+    assign y4 = A_o2_y40;
+    assign y5 = A_o8_y50+A_o8_y51+A_o8_y52+A_o8_y53;
+    assign y6 = A_o4_y60+A_o4_y61;
+    assign y7 = A_o8_y70+A_o8_y71+A_o8_y72+A_o8_y73;
+    assign y9 = B_o8_y70+B_o8_y71+B_o8_y72+B_o8_y73;
+    assign y10 = B_o4_y60+B_o4_y61;
+    assign y11 = B_o8_y50+B_o8_y51+B_o8_y52+B_o8_y53;
+
+    assign x_out = {
+        (is_dc) ? y0[15:4] :
+                (is_dc2 ? (y0[16]^y0[13] ? (y0[16] ? 12'h800 : 12'h7ff) : y0[13:2]) : y0[13:2]),
+        is_dc ? (y1[16]^y1[13] ? (y1[16] ? 12'h800 : 12'h7ff) : y1[13:2]) : y1[13:2], y2[13:2], y3[13:2],
+        y4[13:2], y5[13:2], y6[13:2], y7[13:2],
+        y8[13:2], y9[13:2], y10[13:2], y11[13:2]
+    };
+
+endmodule
+
+module D_FF128_v9(q, d, clk, rstn);
+
+	output reg [127:0] q;
+	input [127:0] d;
+    input clk, rstn;
+
+	always @(posedge clk)
+		if (!rstn) q <= 128'b0;
+		else q <= d;
+
+endmodule
+
+module D_FF192_v9(q, d, clk, rstn);
+
+	output reg [191:0] q;
+	input [191:0] d;
+    input clk, rstn;
+
+	always @(posedge clk)
+		if (!rstn) q <= 192'b0;
+		else q <= d;
+
+endmodule
+
